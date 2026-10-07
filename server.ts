@@ -14,6 +14,7 @@ import {
   listRecords,
   upsertRecord,
 } from "./server/database";
+import { authorizeWrite, isAdmin } from "./server/permissions";
 
 // Connected SSE clients for real-time sync
 const sseClients = new Set<express.Response>();
@@ -207,6 +208,9 @@ async function startServer() {
     const identity = await verifyFirebaseIdToken(String(req.body.idToken || ''));
     const users = await listRecords<User>('users');
     const existing = users.find((user) => user.email.toLowerCase() === identity.email);
+    if (!existing && users.length > 0 && process.env.ALLOW_OPEN_SIGNUP !== 'true') {
+      return res.status(403).json({ error: 'Tu cuenta no está registrada. Pide a un administrador que te agregue al equipo.' });
+    }
     const user: User = existing
       ? { ...existing, name: identity.name, avatar: identity.avatar || existing.avatar, lastActive: 'Ahora mismo' }
       : {
@@ -238,16 +242,24 @@ async function startServer() {
     res.json({ user: sanitizeUser(user), token: signSession(user) });
   }));
 
-  app.use('/api', (req, res, next) => {
+  app.use('/api', asyncRoute(async (req, res, next) => {
     const headerToken = req.headers.authorization?.startsWith('Bearer ')
       ? req.headers.authorization.slice(7)
       : '';
     const queryToken = typeof req.query.token === 'string' ? req.query.token : '';
     const session = verifySession(headerToken || queryToken);
     if (!session) return res.status(401).json({ error: 'Sesión inválida o vencida.' });
+    const actor = await findRecord<StoredUser>('users', session.sub);
+    if (!actor) return res.status(401).json({ error: 'Sesión inválida o vencida.' });
     res.locals.session = session;
+    res.locals.actor = actor;
     next();
-  });
+  }));
+
+  const requireAdmin: express.RequestHandler = (_req, res, next) => {
+    if (!isAdmin(res.locals.actor)) return res.status(403).json({ error: 'Solo un administrador puede realizar esta acción.' });
+    next();
+  };
 
   app.get("/api/bootstrap", asyncRoute(async (_req, res) => {
     const entries = await Promise.all(
@@ -269,14 +281,19 @@ async function startServer() {
       return res.status(404).json({ error: 'Colección no encontrada' });
     }
     let record = { ...req.body, id: req.params.id };
+    const stored = await findRecord<StoredUser>(collection, req.params.id);
+    const denied = authorizeWrite(res.locals.actor, collection, 'PUT', stored, record);
+    if (denied) return res.status(403).json({ error: denied });
     if (collection === 'users') {
-      const existing = await findRecord<StoredUser>('users', req.params.id);
+      const existing = stored;
       record = {
         ...existing,
         ...record,
         ...(req.body.pinCode ? { pinHash: hashPin(String(req.body.pinCode)) } : existing?.pinHash ? { pinHash: existing.pinHash } : {}),
       };
       delete record.pinCode;
+      record.role = normalizeUserRole(record.role);
+      record.department = normalizeDepartment(record.department);
     }
     await upsertRecord(collection, record);
     const responseRecord = collection === 'users' ? sanitizeUser(record as User) : record;
@@ -289,6 +306,9 @@ async function startServer() {
     if (!COLLECTIONS.includes(collection)) {
       return res.status(404).json({ error: 'Colección no encontrada' });
     }
+    const stored = await findRecord<any>(collection, req.params.id);
+    const denied = authorizeWrite(res.locals.actor, collection, 'DELETE', stored, {});
+    if (denied) return res.status(403).json({ error: denied });
     await deleteRecord(collection, req.params.id);
     broadcastSyncEvent('DATA_DELETED', { collection, id: req.params.id });
     res.json({ success: true, id: req.params.id });
@@ -321,7 +341,7 @@ async function startServer() {
     res.json((await listRecords<User>('users')).map(sanitizeUser));
   }));
 
-  app.post("/api/users", asyncRoute(async (req, res) => {
+  app.post("/api/users", requireAdmin, asyncRoute(async (req, res) => {
     const normalizedEmail = String(req.body.email || 'empleado@stonerscolombia.com').toLowerCase();
     const existing = await findRecordByField<StoredUser>('users', 'email', normalizedEmail);
     if (existing) {
@@ -368,6 +388,13 @@ async function startServer() {
   }));
 
   app.post("/api/tasks", asyncRoute(async (req, res) => {
+    const actor = res.locals.actor as StoredUser;
+    if (actor.role === 'contador') {
+      return res.status(403).json({ error: 'El rol contador solo puede visualizar.' });
+    }
+    if (!isAdmin(actor) && req.body.assignedToId !== actor.id) {
+      return res.status(403).json({ error: 'Solo puedes crear tareas asignadas a ti.' });
+    }
     const users = await listRecords<User>('users');
     const newTask: Task = {
       id: req.body.id || `task-${Date.now()}`,
@@ -425,13 +452,16 @@ async function startServer() {
     }
 
     const updated = { ...task, ...req.body, id: task.id };
+    const denied = authorizeWrite(res.locals.actor, 'tasks', 'PUT', task, updated)
+      || authorizeWrite(res.locals.actor, 'tasks', 'PUT', updated, updated);
+    if (denied) return res.status(403).json({ error: denied });
     await upsertRecord('tasks', updated);
     broadcastSyncEvent("TASK_UPDATED", updated);
 
     res.json(updated);
   }));
 
-  app.delete("/api/tasks/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/tasks/:id", requireAdmin, asyncRoute(async (req, res) => {
     const taskId = req.params.id;
     await deleteRecord('tasks', taskId);
     broadcastSyncEvent("TASK_DELETED", { id: taskId });
@@ -443,7 +473,7 @@ async function startServer() {
     res.json(await listRecords<SOPProcedure>('sops'));
   }));
 
-  app.post("/api/sops", asyncRoute(async (req, res) => {
+  app.post("/api/sops", requireAdmin, asyncRoute(async (req, res) => {
     const newSOP: SOPProcedure = {
       id: req.body.id || `sop-${Date.now()}`,
       code: req.body.code || `SOP-${(req.body.department || "DISP").substring(0, 3).toUpperCase()}-${Math.floor(10 + Math.random() * 90)}`,
@@ -591,7 +621,7 @@ Instrucciones específicas para responder:
     });
     app.use(vite.middlewares);
   } else {
-    const frontendUrl = process.env.FRONTEND_URL || 'https://lizethvictoria20.github.io/stonersApp/';
+    const frontendUrl = process.env.FRONTEND_URL || 'https://stonerscolombia-wq.github.io/stonersApp/';
     app.get("*", (req, res) => {
       const relativePath = req.path === '/' ? '' : req.path.replace(/^\//, '');
       res.redirect(302, new URL(relativePath, frontendUrl).toString());
