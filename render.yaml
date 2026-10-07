@@ -10,9 +10,9 @@ services:
       - key: NODE_ENV
         value: production
       - key: CORS_ORIGIN
-        value: https://lizethvictoria20.github.io
+        value: https://stonerscolombia-wq.github.io
       - key: FRONTEND_URL
-        value: https://lizethvictoria20.github.io/stonersApp/
+        value: https://stonerscolombia-wq.github.io/stonersApp/
       - key: GEMINI_API_KEY
         sync: false
       - key: SUPABASE_URL

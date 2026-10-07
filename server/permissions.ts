@@ -28,6 +28,10 @@ export function authorizeWrite(
 
   if (ADMIN_ONLY.includes(collection)) return deny;
 
+  // El contador solo visualiza: lo único que puede tocar son sus propias
+  // notificaciones (por ejemplo, marcarlas como leídas).
+  if (actor.role === 'contador' && collection !== 'notifications') return deny;
+
   switch (collection) {
     case 'tasks': {
       if (method === 'DELETE') return deny;

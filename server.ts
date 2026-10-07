@@ -389,6 +389,9 @@ async function startServer() {
 
   app.post("/api/tasks", asyncRoute(async (req, res) => {
     const actor = res.locals.actor as StoredUser;
+    if (actor.role === 'contador') {
+      return res.status(403).json({ error: 'El rol contador solo puede visualizar.' });
+    }
     if (!isAdmin(actor) && req.body.assignedToId !== actor.id) {
       return res.status(403).json({ error: 'Solo puedes crear tareas asignadas a ti.' });
     }
@@ -618,7 +621,7 @@ Instrucciones específicas para responder:
     });
     app.use(vite.middlewares);
   } else {
-    const frontendUrl = process.env.FRONTEND_URL || 'https://lizethvictoria20.github.io/stonersApp/';
+    const frontendUrl = process.env.FRONTEND_URL || 'https://stonerscolombia-wq.github.io/stonersApp/';
     app.get("*", (req, res) => {
       const relativePath = req.path === '/' ? '' : req.path.replace(/^\//, '');
       res.redirect(302, new URL(relativePath, frontendUrl).toString());
